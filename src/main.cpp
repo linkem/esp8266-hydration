@@ -20,18 +20,23 @@ struct Config
   int mqtt_server_port = 1883;
 
   //mqtt params
-  bool useMQTT = useWifi && true;
+  bool useMQTT = useWifi && false;
   const char *publish_topic = "home/livingroom/hydration/avocado";
   const char *sub_topic = "config/home/livingroom/hydration/avocado";
   //general
-  unsigned long humAndTempCheckPeriod = 10000; //1s
+  unsigned long humAndTempCheckPeriod = 1000; //1s
+  unsigned long lcdRefreshPeriod = 1000;      //1s
+  unsigned long pumpPeriod = 20000;           //20s
 
   bool userLCD = true;
-
+  //hydration
+  int hydrationLevel = 700;
 } config;
 
 //general params
-unsigned long time_now = 0;
+unsigned long sensors_time_now = 0;
+unsigned long pump_time_now = 0;
+bool pumpUsed = false;
 
 //lcd params
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -40,6 +45,8 @@ unsigned long lcd_refreshes = 0;
 //dht params
 DHT dht(DHTPIN, DHTTYPE);
 String publishMessage;
+float humidity;
+float temperature;
 
 //mqtt params
 WiFiClient espClient;
@@ -48,10 +55,15 @@ unsigned long lastMsg = 0;
 #define MSG_BUFFER_SIZE (50)
 char msg[MSG_BUFFER_SIZE];
 String mqttClientId;
-//soil moisture params
-const int analogInPin = A0;
 
-void printLine(const String &s, int line = 0)
+//soil moisture params
+const int MOISTURE_PIN = A0;
+int soilMoisture;
+
+//pump
+const int PUMP_PIN = D3;
+
+void lcdPrintLine(const String &s, int line = 0)
 {
   lcd.setCursor(0, line);
   lcd.print(s);
@@ -59,11 +71,10 @@ void printLine(const String &s, int line = 0)
 void lcdPrint(const String &line1, const String &line2, bool clear = false)
 {
   if (clear)
-  {
     lcd.clear();
-  }
-  printLine(line1);
-  printLine(line2, 1);
+
+  lcdPrintLine(line1);
+  lcdPrintLine(line2, 1);
 }
 
 void mqttCallback(char *topic, byte *payload, unsigned int length)
@@ -101,9 +112,9 @@ void setup_wifi()
       lcd.print(".");
     }
     lcd.clear();
-    printLine("WiFi connected ");
-    printLine("IP address:");
-    printLine(WiFi.localIP().toString(), 1);
+    lcdPrintLine("WiFi connected");
+    lcdPrintLine("IP address:");
+    lcdPrintLine(WiFi.localIP().toString(), 1);
   }
 }
 
@@ -118,15 +129,15 @@ void setup_mqtt()
 }
 void setup()
 {
+  Serial.begin(74880);
   pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH);
-  Serial.begin(115200);
   lcd.init();
   lcd.backlight();
   dht.begin();
-  setup_wifi();
-  setup_mqtt();
 }
+
 void publish_message(const char *topic, const char *message)
 {
   if (!mqttClient.connected() || !config.useMQTT)
@@ -137,47 +148,50 @@ void publish_message(const char *topic, const char *message)
   Serial.println(message);
   mqttClient.publish(topic, message);
 }
-void writeSensorData()
+
+void printSensorData()
+{
+  lcd_refreshes++;
+  String envString = String(humidity, 1) + "%H " + String(temperature, 1) + "*C" + lcd_refreshes;
+  String hydrationString;
+  if (soilMoisture > config.hydrationLevel)
+  {
+    hydrationString = "Dehydrated, " + String(soilMoisture);
+    digitalWrite(LED_BUILTIN, LOW); // soil is dry
+  }
+  else
+  {
+    hydrationString = "Hydrated, " + String(soilMoisture);
+    digitalWrite(LED_BUILTIN, HIGH); // soil is wet
+  }
+  lcdPrint(envString, hydrationString, true);
+}
+
+void readSensorData()
 {
   unsigned long currentMillis = millis();
-  if ((unsigned long)(currentMillis - time_now) > config.humAndTempCheckPeriod)
+  if ((unsigned long)(currentMillis - sensors_time_now) > config.humAndTempCheckPeriod)
   {
-    time_now = currentMillis;
-    lcd.clear();
-    lcd_refreshes++;
-    float humidity = dht.readHumidity();
-    float temp = dht.readTemperature();
-    
-    String envString = String(humidity, 1) + "%H " + String(temp, 1) + "*C " + lcd_refreshes;
-    printLine(envString);
-
-    int soilMoisture = analogRead(analogInPin);
-    String hydrationString;
-    if (soilMoisture > 700)
-    {
-      hydrationString = "Dehydrated, " + String(soilMoisture);
-      digitalWrite(LED_BUILTIN, LOW); // soil is dry
-      printLine(hydrationString, 1);
-    }
-    else
-    {
-      hydrationString = "Hydrated, " + String(soilMoisture);
-      digitalWrite(LED_BUILTIN, HIGH); // soil is wet
-      printLine(hydrationString, 1);
-    }
-
-    HydrationSensor sensorData(mqttClientId.c_str(), humidity, temp, soilMoisture, "avocadoi soil");
-    publish_message(config.publish_topic, sensorData.getJson().c_str());
+    sensors_time_now = currentMillis;
+    humidity = dht.readHumidity();
+    temperature = dht.readTemperature();
+    soilMoisture = analogRead(MOISTURE_PIN);
+    printSensorData();
   }
 }
 
+void publishSensorData()
+{
+  HydrationSensor sensorData(mqttClientId.c_str(), humidity, temperature, soilMoisture, "avocado soil");
+  publish_message(config.publish_topic, sensorData.getJson().c_str());
+}
 void reconnect()
 {
   // Loop until we're reconnected
   while (!mqttClient.connected())
   {
     Serial.print("Attempting MQTT connection...");
-    printLine1("Attempting MQTT connection...");
+    lcdPrintLine("Attempting MQTT connection...");
     // Create a random client ID
     // Attempt to connect
     if (mqttClient.connect(mqttClientId.c_str()))
@@ -190,25 +204,43 @@ void reconnect()
     {
       String errorMessageLine1 = "failed, rc=" + mqttClient.state();
       String errorMessageLine2 = "try again in 5 seconds";
-      printLine(errorMessageLine1);
-      printLine(errorMessageLine2, 1);
+      lcdPrintLine(errorMessageLine1);
+      lcdPrintLine(errorMessageLine2, 1);
       Serial.print(errorMessageLine1);
       Serial.println(errorMessageLine2);
-      ;
       delay(5000); // Wait 5 seconds before retrying
     }
   }
 }
+bool usePump()
+{
+  return soilMoisture > config.hydrationLevel && humidity != 0.0 && temperature != 0.0;
+}
+void pump()
+{
+  unsigned long currentMillis = millis();
+  if ((unsigned long)(currentMillis - pump_time_now) > config.pumpPeriod && usePump())
+  {
+    pump_time_now = currentMillis;
+    digitalWrite(PUMP_PIN, HIGH);
+    delay(3000);
+    digitalWrite(PUMP_PIN, LOW);
+  }
+}
+
 void loop()
 {
-  writeSensorData();
-  if (!config.useMQTT || !config.useWifi)
-  {
-    return;
-  }
-  if (!mqttClient.connected())
-  {
-    reconnect();
-  }
-  mqttClient.loop();
+  readSensorData();
+  // printSensorData();
+  // publishSensorData();
+  pump();
+  // if (!config.useMQTT || !config.useWifi)
+  // {
+  //   return;
+  // }
+  // if (!mqttClient.connected())
+  // {
+  //   reconnect();
+  // }
+  // mqttClient.loop();
 }
