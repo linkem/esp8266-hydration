@@ -5,9 +5,12 @@
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include "HydrationSensor.h"
+#include "Helpers.h"
 
 #define DHTPIN 13 // Digital pin connected to the DHT sensor
 #define DHTTYPE DHT11
+#define MOISTURE_PIN A0
+// #define PUMP_PIN D3
 
 //general types
 struct Config
@@ -16,17 +19,19 @@ struct Config
   bool useWifi = true;
   const char *ssid = "ALHN-3A82";
   const char *password = "LubiePlacki2018";
-  const char *mqtt_server = "192.168.1.68";
+  const char *mqtt_server = "192.168.1.100";
   int mqtt_server_port = 1883;
 
   //mqtt params
-  bool useMQTT = useWifi && false;
+  bool useMQTT = useWifi && true;
   const char *publish_topic = "home/livingroom/hydration/avocado";
   const char *sub_topic = "config/home/livingroom/hydration/avocado";
   //general
-  unsigned long humAndTempCheckPeriod = 1000; //1s
-  unsigned long lcdRefreshPeriod = 1000;      //1s
-  unsigned long pumpPeriod = 20000;           //20s
+  unsigned long generalPeriod = 30 * 1000;         //30s
+  unsigned long humAndTempCheckPeriod = 1000;      //1s
+  unsigned long lcdRefreshPeriod = 1000;           //1s
+  unsigned long pumpPeriod = 20000;                //20s
+  unsigned long mqttPubllishPeriod = 1 * 30 * 500; //0.5min
 
   bool userLCD = true;
   //hydration
@@ -34,8 +39,10 @@ struct Config
 } config;
 
 //general params
+unsigned long general_time_now = 0;
 unsigned long sensors_time_now = 0;
 unsigned long pump_time_now = 0;
+unsigned long mqtt_publish_time_now = 0;
 bool pumpUsed = false;
 
 //lcd params
@@ -57,12 +64,9 @@ char msg[MSG_BUFFER_SIZE];
 String mqttClientId;
 
 //soil moisture params
-const int MOISTURE_PIN = A0;
 int soilMoisture;
 
-//pump
-const int PUMP_PIN = D3;
-
+#pragma region lcd_helpers
 void lcdPrintLine(const String &s, int line = 0)
 {
   lcd.setCursor(0, line);
@@ -76,7 +80,8 @@ void lcdPrint(const String &line1, const String &line2, bool clear = false)
   lcdPrintLine(line1);
   lcdPrintLine(line2, 1);
 }
-
+#pragma endregion lcd_helpers
+#pragma region setup
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
   Serial.print("Message arrived [");
@@ -117,7 +122,6 @@ void setup_wifi()
     lcdPrintLine(WiFi.localIP().toString(), 1);
   }
 }
-
 void setup_mqtt()
 {
   if (config.useMQTT)
@@ -127,77 +131,47 @@ void setup_mqtt()
     mqttClientId = WiFi.macAddress();
   }
 }
+
+void setup_lcd()
+{
+  lcd.init();
+  lcd.backlight();
+}
+
+void setup_dht()
+{
+  dht.begin();
+}
+void setup_pins()
+{
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
+
+  // pinMode(PUMP_PIN, OUTPUT);
+}
 void setup()
 {
   Serial.begin(74880);
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(PUMP_PIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, HIGH);
-  lcd.init();
-  lcd.backlight();
-  dht.begin();
+  setup_pins();
+  setup_dht();
+  setup_lcd();
+  setup_wifi();
+  setup_mqtt();
 }
-
-void publish_message(const char *topic, const char *message)
-{
-  if (!mqttClient.connected() || !config.useMQTT)
-  {
-    return;
-  }
-
-  Serial.println(message);
-  mqttClient.publish(topic, message);
-}
-
-void printSensorData()
-{
-  lcd_refreshes++;
-  String envString = String(humidity, 1) + "%H " + String(temperature, 1) + "*C" + lcd_refreshes;
-  String hydrationString;
-  if (soilMoisture > config.hydrationLevel)
-  {
-    hydrationString = "Dehydrated, " + String(soilMoisture);
-    digitalWrite(LED_BUILTIN, LOW); // soil is dry
-  }
-  else
-  {
-    hydrationString = "Hydrated, " + String(soilMoisture);
-    digitalWrite(LED_BUILTIN, HIGH); // soil is wet
-  }
-  lcdPrint(envString, hydrationString, true);
-}
-
-void readSensorData()
-{
-  unsigned long currentMillis = millis();
-  if ((unsigned long)(currentMillis - sensors_time_now) > config.humAndTempCheckPeriod)
-  {
-    sensors_time_now = currentMillis;
-    humidity = dht.readHumidity();
-    temperature = dht.readTemperature();
-    soilMoisture = analogRead(MOISTURE_PIN);
-    printSensorData();
-  }
-}
-
-void publishSensorData()
-{
-  HydrationSensor sensorData(mqttClientId.c_str(), humidity, temperature, soilMoisture, "avocado soil");
-  publish_message(config.publish_topic, sensorData.getJson().c_str());
-}
+#pragma endregion setup
+#pragma region mqtt
 void reconnect()
 {
   // Loop until we're reconnected
   while (!mqttClient.connected())
   {
     Serial.print("Attempting MQTT connection...");
-    lcdPrintLine("Attempting MQTT connection...");
+    lcdPrintLine("Attempting MQTT connection...", 1);
     // Create a random client ID
     // Attempt to connect
     if (mqttClient.connect(mqttClientId.c_str()))
     {
       Serial.println("connected");
-      mqttClient.publish(config.publish_topic, "hello world");
       mqttClient.subscribe(config.sub_topic);
     }
     else
@@ -212,35 +186,86 @@ void reconnect()
     }
   }
 }
-bool usePump()
+void publish_message(const char *topic, const char *message)
 {
-  return soilMoisture > config.hydrationLevel && humidity != 0.0 && temperature != 0.0;
-}
-void pump()
-{
-  unsigned long currentMillis = millis();
-  if ((unsigned long)(currentMillis - pump_time_now) > config.pumpPeriod && usePump())
-  {
-    pump_time_now = currentMillis;
-    digitalWrite(PUMP_PIN, HIGH);
-    delay(3000);
-    digitalWrite(PUMP_PIN, LOW);
-  }
+  if (!config.useMQTT)
+    return;
+
+  if (!mqttClient.connected())
+    reconnect();
+
+  Serial.println("Publish - topic: ");
+  Serial.println(topic);
+  Serial.println(message);
+  mqttClient.publish(topic, message);
 }
 
+#pragma endregion mqtt
+void printSensorData()
+{
+  lcd_refreshes++;
+  String envString = String(humidity, 1) + "%H " + String(temperature, 1) + "*C" + lcd_refreshes;
+  String hydrationString;
+
+  hydrationString = soilMoisture > config.hydrationLevel ? "Dehydrated, " : "Hydrated, ";
+  hydrationString += String(soilMoisture);
+  lcdPrint(envString, hydrationString, true);
+}
+void publishSensorData()
+{
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(125);
+  HydrationSensor sensorData(mqttClientId.c_str(), humidity, temperature, soilMoisture, "avocado soil");
+  publish_message(config.publish_topic, sensorData.getJson().c_str());
+  delay(125);
+  digitalWrite(LED_BUILTIN, HIGH);
+}
+void readSensorData()
+{
+  humidity = dht.readHumidity();
+  temperature = dht.readTemperature();
+  soilMoisture = analogRead(MOISTURE_PIN);
+}
+
+#pragma region pump
+// bool usePump()
+// {
+//   return soilMoisture > config.hydrationLevel && !isnan(humidity) && !isnan(temperature);
+// }
+// void pump()
+// {
+//   unsigned long currentMillis = millis();
+//   if ((unsigned long)(currentMillis - pump_time_now) > config.pumpPeriod && usePump())
+//   {
+//     pump_time_now = currentMillis;
+//     digitalWrite(PUMP_PIN, HIGH);
+//     delay(3000);
+//     digitalWrite(PUMP_PIN, LOW);
+//   }
+// }
+#pragma endregion pump
 void loop()
 {
-  readSensorData();
+  unsigned long currentMillis = millis();
+  if ((unsigned long)(currentMillis - general_time_now) > config.generalPeriod || general_time_now == 0)
+  {
+    general_time_now = currentMillis;
+    Serial.println("WIFI wake UP!");
+    wifi_fpm_do_wakeup();
+    // WiFi.forceSleepWake();
+    delay(100);
+    readSensorData();
+    printSensorData();
+    publishSensorData();
+    printSensorData();
+
+    Serial.println("WIFI go sleep");
+    wifi_set_sleep_type(MODEM_SLEEP_T);
+  }
+
   // printSensorData();
   // publishSensorData();
-  pump();
-  // if (!config.useMQTT || !config.useWifi)
-  // {
-  //   return;
-  // }
-  // if (!mqttClient.connected())
-  // {
-  //   reconnect();
-  // }
+  // pump();
+
   // mqttClient.loop();
 }
