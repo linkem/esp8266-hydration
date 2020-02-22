@@ -7,10 +7,10 @@
 #include "HydrationSensor.h"
 #include "Helpers.h"
 
-#define DHTPIN 13 // Digital pin connected to the DHT sensor
+#define DHTPIN D6 // Digital pin connected to the DHT sensor
 #define DHTTYPE DHT11
 #define MOISTURE_PIN A0
-// #define PUMP_PIN D3
+// #define PUMP_PIN `D3
 
 //general types
 struct Config
@@ -27,12 +27,13 @@ struct Config
   const char *publish_topic = "home/livingroom/hydration/avocado";
   const char *sub_topic = "config/home/livingroom/hydration/avocado";
   //general
-  unsigned long generalPeriod = 30 * 1000;         //30s
-  unsigned long humAndTempCheckPeriod = 1000;      //1s
-  unsigned long lcdRefreshPeriod = 1000;           //1s
-  unsigned long pumpPeriod = 20000;                //20s
-  unsigned long mqttPubllishPeriod = 1 * 30 * 500; //0.5min
-
+  unsigned long generalPeriod = 1000;                //1s
+  unsigned long humAndTempCheckPeriod = 1000;        //1s
+  unsigned long lcdRefreshPeriod = 1000;             //1s
+  unsigned long pumpPeriod = 20000;                  //20s
+  unsigned long mqttPubllishPeriod = 1 * 30 * 500;   //0.5min
+  unsigned long sleepPeriod = /*60 * */ 60 * 1000 * 1000; //60s
+                                      //30    000    000
   bool userLCD = true;
   //hydration
   int hydrationLevel = 700;
@@ -149,15 +150,6 @@ void setup_pins()
 
   // pinMode(PUMP_PIN, OUTPUT);
 }
-void setup()
-{
-  Serial.begin(74880);
-  setup_pins();
-  setup_dht();
-  setup_lcd();
-  setup_wifi();
-  setup_mqtt();
-}
 #pragma endregion setup
 #pragma region mqtt
 void reconnect()
@@ -244,24 +236,41 @@ void readSensorData()
 //   }
 // }
 #pragma endregion pump
+
+void setup()
+{
+  Serial.begin(74880);
+  while (!Serial)
+  {
+  }
+  Serial.println("AWAKE");
+  setup_pins();
+  setup_dht();
+  setup_lcd();
+  setup_wifi();
+  setup_mqtt();
+
+  delay(2000);
+  readSensorData();
+  printSensorData();
+  publishSensorData();
+  printSensorData();
+
+  Serial.println("ESP go sleep");
+  lcd.setCursor(11,1);
+  lcd.print("Sleep");
+  delay(100);
+  ESP.deepSleep(config.sleepPeriod);
+
+}
 void loop()
 {
-  unsigned long currentMillis = millis();
-  if ((unsigned long)(currentMillis - general_time_now) > config.generalPeriod || general_time_now == 0)
-  {
-    general_time_now = currentMillis;
-    Serial.println("WIFI wake UP!");
-    wifi_fpm_do_wakeup();
-    // WiFi.forceSleepWake();
-    delay(100);
-    readSensorData();
-    printSensorData();
-    publishSensorData();
-    printSensorData();
+  // unsigned long currentMillis = millis();
+  // if ((unsigned long)(currentMillis - general_time_now) > config.generalPeriod || general_time_now == 0)
+  // {
+  //   general_time_now = currentMillis;
 
-    Serial.println("WIFI go sleep");
-    wifi_set_sleep_type(MODEM_SLEEP_T);
-  }
+  // }
 
   // printSensorData();
   // publishSensorData();
