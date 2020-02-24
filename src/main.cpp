@@ -10,7 +10,7 @@
 #define DHTPIN D6 // Digital pin connected to the DHT sensor
 #define DHTTYPE DHT11
 #define MOISTURE_PIN A0
-// #define PUMP_PIN `D3
+#define PUMP_PIN D3
 
 //general types
 struct Config
@@ -27,16 +27,18 @@ struct Config
   const char *publish_topic = "home/livingroom/hydration/avocado";
   const char *sub_topic = "config/home/livingroom/hydration/avocado";
   //general
-  unsigned long generalPeriod = 1000;                //1s
-  unsigned long humAndTempCheckPeriod = 1000;        //1s
-  unsigned long lcdRefreshPeriod = 1000;             //1s
-  unsigned long pumpPeriod = 20000;                  //20s
-  unsigned long mqttPubllishPeriod = 1 * 30 * 500;   //0.5min
-  unsigned long sleepPeriod = /*60 * */ 60 * 1000 * 1000; //60s
-                                      //30    000    000
+  unsigned long generalPeriod = 1000;                               //1s
+  unsigned long humAndTempCheckPeriod = 1000;                       //1s
+  unsigned long lcdRefreshPeriod = 1000;                            //1s
+  unsigned long pumpPeriod = 20000;                                 //20s
+  unsigned long mqttPubllishPeriod = 1 * 30 * 500;                  //0.5min
+  unsigned long sleepPeriod = 60 * 60 * 1000 * (unsigned long)1000; //1h
+                                                                    //30    000    000
   bool userLCD = true;
   //hydration
-  int hydrationLevel = 700;
+  int hydrationLevel = 50;
+  int drySoil = 700;
+  int wetSoil = 200;
 } config;
 
 //general params
@@ -147,8 +149,8 @@ void setup_pins()
 {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH);
-
-  // pinMode(PUMP_PIN, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
+  digitalWrite(PUMP_PIN, LOW);
 }
 #pragma endregion setup
 #pragma region mqtt
@@ -189,7 +191,7 @@ void publish_message(const char *topic, const char *message)
   Serial.println("Publish - topic: ");
   Serial.println(topic);
   Serial.println(message);
-  mqttClient.publish(topic, message);
+  mqttClient.publish(topic, message, true);
 }
 
 #pragma endregion mqtt
@@ -216,25 +218,22 @@ void readSensorData()
 {
   humidity = dht.readHumidity();
   temperature = dht.readTemperature();
-  soilMoisture = analogRead(MOISTURE_PIN);
+  float soilTempVal = analogRead(MOISTURE_PIN);
+  soilMoisture = map(soilTempVal, config.drySoil, config.wetSoil, 0, 100);
 }
 
 #pragma region pump
-// bool usePump()
-// {
-//   return soilMoisture > config.hydrationLevel && !isnan(humidity) && !isnan(temperature);
-// }
-// void pump()
-// {
-//   unsigned long currentMillis = millis();
-//   if ((unsigned long)(currentMillis - pump_time_now) > config.pumpPeriod && usePump())
-//   {
-//     pump_time_now = currentMillis;
-//     digitalWrite(PUMP_PIN, HIGH);
-//     delay(3000);
-//     digitalWrite(PUMP_PIN, LOW);
-//   }
-// }
+bool usePump()
+{
+  return soilMoisture > config.hydrationLevel && !isnan(humidity) && !isnan(temperature);
+}
+void pump()
+{
+  pump_time_now = currentMillis;
+  digitalWrite(PUMP_PIN, HIGH);
+  delay(3000);
+  digitalWrite(PUMP_PIN, LOW);
+}
 #pragma endregion pump
 
 void setup()
@@ -255,13 +254,14 @@ void setup()
   printSensorData();
   publishSensorData();
   printSensorData();
-
+  delay(100);
+  pump();
   Serial.println("ESP go sleep");
-  lcd.setCursor(11,1);
+  lcd.setCursor(11, 1);
   lcd.print("Sleep");
   delay(100);
-  ESP.deepSleep(config.sleepPeriod);
 
+  ESP.deepSleep(config.sleepPeriod);
 }
 void loop()
 {
