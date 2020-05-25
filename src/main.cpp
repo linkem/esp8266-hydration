@@ -1,13 +1,16 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <Adafruit_Sensor.h>
 #include <DHT.h>
+#include <SPI.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include "HydrationSensor.h"
 #include "Helpers.h"
 
-#define DHTPIN D6 // Digital pin connected to the DHT sensor
+#define DHT_VCC D0
+#define DHTPIN D5 // Digital pin connected to the DHT sensor
 #define DHTTYPE DHT11
 #define MOISTURE_PIN A0
 #define PUMP_PIN D3
@@ -24,21 +27,23 @@ struct Config
 
   //mqtt params
   bool useMQTT = useWifi && true;
-  const char *publish_topic = "home/livingroom/hydration/avocado";
-  const char *sub_topic = "config/home/livingroom/hydration/avocado";
+  const char *publish_topic = "home/hydration/livingroom/avocado";
+  const char *sub_topic = "config/home/hydration/livingroom/avocado";
   //general
-  unsigned long generalPeriod = 1000;                               //1s
-  unsigned long humAndTempCheckPeriod = 1000;                       //1s
-  unsigned long lcdRefreshPeriod = 1000;                            //1s
-  unsigned long pumpPeriod = 20000;                                 //20s
-  unsigned long mqttPubllishPeriod = 1 * 30 * 500;                  //0.5min
-  unsigned long sleepPeriod = 60 * 60 * 1000 * (unsigned long)1000; //1h
-                                                                    //30    000    000
+  unsigned long generalPeriod = 1000;              //1s
+  unsigned long humAndTempCheckPeriod = 1000;      //1s
+  unsigned long lcdRefreshPeriod = 1000;           //1s
+  unsigned long pumpPeriod = 20000;                //20s
+  unsigned long mqttPubllishPeriod = 1 * 30 * 500; //0.5min
+  // unsigned long sleepPeriod = 10 * 60 * 1000 * (unsigned long)1000; //10min
+  unsigned long sleepPeriod = 1 * 60 * (unsigned long)1000; //1 min
+
+  //30    000    000
   bool userLCD = true;
   //hydration
   int hydrationLevel = 50;
-  int drySoil = 700;
-  int wetSoil = 200;
+  int drySoil = 1024;
+  int wetSoil = 440;
 } config;
 
 //general params
@@ -143,8 +148,21 @@ void setup_lcd()
 
 void setup_dht()
 {
-  dht.begin();
+  pinMode(DHTPIN, INPUT);
+  pinMode(DHT_VCC, OUTPUT);
+  digitalWrite(DHT_VCC, HIGH);
+  delay(5000);
+  dht.begin(100);
 }
+
+// void DHT_restart() {
+//   digitalWrite(DHT_VCC, LOW);
+//   digitalWrite(DHTPIN, LOW);
+//   delay(1000);
+//   digitalWrite(DHT_VCC, HIGH);
+//   digitalWrite(DHTPIN, HIGH);
+//   delay(1000);
+// }
 void setup_pins()
 {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -191,7 +209,7 @@ void publish_message(const char *topic, const char *message)
   Serial.println("Publish - topic: ");
   Serial.println(topic);
   Serial.println(message);
-  mqttClient.publish(topic, message, true);
+  mqttClient.publish(topic, message, false);
 }
 
 #pragma endregion mqtt
@@ -209,16 +227,29 @@ void publishSensorData()
 {
   digitalWrite(LED_BUILTIN, LOW);
   delay(125);
-  HydrationSensor sensorData(mqttClientId.c_str(), humidity, temperature, soilMoisture, "avocado soil");
+  HydrationSensor sensorData(mqttClientId.c_str(), humidity, temperature, soilMoisture, "avocado");
   publish_message(config.publish_topic, sensorData.getJson().c_str());
   delay(125);
   digitalWrite(LED_BUILTIN, HIGH);
 }
 void readSensorData()
 {
-  humidity = dht.readHumidity();
-  temperature = dht.readTemperature();
+  int readDhtAttempts = 0;
+  // do
+  // {
+    Serial.printf("Try Read DHT: %d \n", readDhtAttempts);
+    delayMicroseconds(2001);
+    bool read = dht.read();
+    readDhtAttempts++;
+    humidity = dht.readHumidity();
+    temperature = dht.readTemperature();
+    Serial.printf("Read: %s \n", read ? "true" : "false");
+    Serial.printf("Hum: %f", humidity);
+    Serial.printf("Temp: %f", temperature);
+  // } while (!dht.read() && readDhtAttempts < 5);
+
   float soilTempVal = analogRead(MOISTURE_PIN);
+  Serial.printf("Moisure: %f", soilTempVal);
   soilMoisture = map(soilTempVal, config.drySoil, config.wetSoil, 0, 100);
 }
 
@@ -229,7 +260,7 @@ bool usePump()
 }
 void pump()
 {
-  pump_time_now = currentMillis;
+  // pump_time_now = currentMillis;
   digitalWrite(PUMP_PIN, HIGH);
   delay(3000);
   digitalWrite(PUMP_PIN, LOW);
@@ -255,22 +286,25 @@ void setup()
   publishSensorData();
   printSensorData();
   delay(100);
-  pump();
-  Serial.println("ESP go sleep");
-  lcd.setCursor(11, 1);
-  lcd.print("Sleep");
-  delay(100);
+  // if(usePump())
+  //   pump();
+  // Serial.println("ESP go sleep");
+  // lcd.setCursor(11, 1);
+  // lcd.print("Sleep");
+  // delay(100);
 
-  ESP.deepSleep(config.sleepPeriod);
+  // ESP.deepSleep(config.sleepPeriod);
 }
 void loop()
 {
-  // unsigned long currentMillis = millis();
-  // if ((unsigned long)(currentMillis - general_time_now) > config.generalPeriod || general_time_now == 0)
-  // {
-  //   general_time_now = currentMillis;
-
-  // }
+  unsigned long currentMillis = millis();
+  if ((unsigned long)(currentMillis - general_time_now) > config.sleepPeriod)
+  {
+    general_time_now = currentMillis;
+    readSensorData();
+    printSensorData();
+    publishSensorData();
+  }
 
   // printSensorData();
   // publishSensorData();
